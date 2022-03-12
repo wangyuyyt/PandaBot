@@ -16,12 +16,14 @@ ROBOT_WHEEL_RADIUS = 0.034  # Wheel radius in meters
 LEFT_ENCODER_PIN = 6
 RIGHT_ENCODER_PIN = 5
 ODOMETRY_PERIOD = 0.2
+ODOMETRY_FRAME = "odom"
+ODOMETRY_CHILD_FRAME = "base_footprint"
 
 class PandabotOdometry(Node):
 
     def __init__(self):
         super().__init__('pandabot_odometry')
-        #self.odom_pub = self.create_publisher(Odometry, 'odometry', 10) 
+        self.odom_pub = self.create_publisher(Odometry, 'odom', 10) 
         self.odom_bd = TransformBroadcaster(self)
         self.subscription = self.create_subscription(
             Twist,
@@ -69,6 +71,9 @@ class PandabotOdometry(Node):
         self.y = 0
         self.th = 0
 
+        self.v = 0
+        self.w = 0
+
     def twist_callback(self, msg):
         """ Set direction for left and right wheel from Twist
         """
@@ -103,60 +108,64 @@ class PandabotOdometry(Node):
             self.right_counter += 1
         self.right_prev = value
 
-    def odometry_callback(self):
-        # Calculate new position
-        # Based on formula in http://www.cs.columbia.edu/~allen/F17/NOTES/icckinematics.pdf
-        self.get_logger().info(f'lc: {self.left_counter}, lcp: {self.left_counter_prev}, rc: {self.right_counter}, rcp: {self.right_counter_prev}')
-        delta_l = 1.0 * (self.left_counter - self.left_counter_prev)/20 * 2 * math.pi * ROBOT_WHEEL_RADIUS
+    def calculate_odometry(self):
+        wheel_l = 1.0 * (self.left_counter - self.left_counter_prev) / 20 * 2 * math.pi * ROBOT_WHEEL_RADIUS
         self.left_counter_prev = self.left_counter
-        delta_r = 1.0 * (self.right_counter - self.right_counter_prev)/20 * 2 * math.pi * ROBOT_WHEEL_RADIUS
+        wheel_r = 1.0 * (self.right_counter - self.right_counter_prev) / 20 * 2 * math.pi * ROBOT_WHEEL_RADIUS
         self.right_counter_prev = self.right_counter
-        
+
         if self.left_direction == -1:
-            delta_l = -delta_l
+            wheel_l = -wheel_l
         if self.right_direction == -1:
-            delta_r = -delta_r
+            wheel_r = -wheel_r
 
-        delta_center = (delta_l + delta_r) / 2
-        dt = ODOMETRY_PERIOD
-        delta_th = (delta_r - delta_l) / ROBOT_WHEEL_SEPARATION
-        #self.get_logger().info(f'dl: {delta_l}, dr:{delta_r}')
+        delta_s = (wheel_l + wheel_r) / 2
+        delta_th = (wheel_r - wheel_l) / ROBOT_WHEEL_SEPARATION
 
-
-        if math.fabs(delta_r - delta_l) < 1.0e-6:  # basically going straight
-            dx = delta_r * math.cos(self.th)
-            dy = delta_r * math.sin(self.th)
-        else:
-            radius = delta_center / delta_th
-            iccX = self.x - radius * math.sin(self.th)
-            iccY = self.y + radius * math.cos(self.th)
-
-            dx = (math.cos(delta_th) - math.sin(delta_th) -1) * (self.x - iccX)
-            dy = (math.sin(delta_th) + math.cos(delta_th) -1) * (self.y - iccY)
-            #dx = cos(delta_th) * (self.x - iccX) - sin(delta_th) * (self.x - iccX) + iccX - self.x
-            #dy = sin(delta_th) * (self.y - iccY) + cos(delta_th) * (self.y - iccY) + iccY - self.y 
-        self.get_logger().info(f'dx: {dx}, dy: {dy}')
-
+        dx = delta_s * math.cos(self.th + (delta_th)/2.0)
+        dy = delta_s * math.sin(self.th + (delta_th)/2.0)
         self.x += dx
         self.y += dy
-        self.th = (self.th + delta_th) % (2 * math.pi)  # bound angle
-        self.get_logger().info(f'x: {self.x}, y:{self.y}, th:{self.th}')
+        self.th = (self.th + delta_th) % (2 * math.pi)
 
-        # Publish odometry
+        self.v = delta_s / ODOMETRY_PERIOD
+        self.w = delta_th / ODOMETRY_PERIOD
 
+    def publish_odometry(self):
         current_time = self.get_clock().now().to_msg()
 
-        # First, publish the transform over tf
+        # Publish odometry topic
+        odom_msg = Odometry()
+
+        odom_msg.header.frame_id = ODOMETRY_FRAME
+        odom_msg.child_frame_id = ODOMETRY_CHILD_FRAME
+        odom_msg.header.stamp = current_time
+
+        odom_msg.pose.pose.position.x = self.x
+        odom_msg.pose.pose.position.y = self.y
+        odom_msg.pose.pose.position.z = 0.0
+
+        quat = tf_transformations.quaternion_from_euler(0, 0, self.th)
+        odom_msg.pose.pose.orientation.x = quat[0]
+        odom_msg.pose.pose.orientation.y = quat[1]
+        odom_msg.pose.pose.orientation.z = quat[2]
+        odom_msg.pose.pose.orientation.w = quat[3]
+
+        odom_msg.twist.twist.linear.x = self.v
+        odom_msg.twist.twist.angular.z = self.w
+
+        self.odom_pub.publish(odom_msg)
+
+        # Publish tf
         t = TransformStamped()
         t.header.stamp = current_time
-        t.header.frame_id = "base_link"
-        t.child_frame_id = "imu_link"
+        t.header.frame_id = ODOMETRY_FRAME
+        t.child_frame_id = ODOMETRY_CHILD_FRAME
 
         t.transform.translation.x = self.x
         t.transform.translation.y = self.y
         t.transform.translation.z = 0.0
 
-        quat = tf_transformations.quaternion_from_euler(0, 0, self.th)
         t.transform.rotation.x = quat[0]
         t.transform.rotation.y = quat[1]
         t.transform.rotation.z = quat[2]
@@ -164,12 +173,14 @@ class PandabotOdometry(Node):
 
         self.odom_bd.sendTransform(t)
 
+    def odometry_callback(self):
+        self.calculate_odometry()
+        self.publish_odometry()
+
 def main(args=None):
     rclpy.init(args=args)
 
     pandabot_odometry = PandabotOdometry()
-    #encoder_thread = Thread(None, pandabot_odometry.check_encoder)
-    #encoder_thread.start()
 
     rclpy.spin(pandabot_odometry)
 
