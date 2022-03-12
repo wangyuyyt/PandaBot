@@ -48,7 +48,7 @@ def generate_launch_description():
         # Launch state publisher
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-               [ThisLaunchFileDir(), '/turtlebot3_state_publisher.launch.py']),
+               [ThisLaunchFileDir(), '/pandabot_state_publisher.launch.py']),
             launch_arguments={'use_sim_time': use_sim_time}.items()
         ),
 
